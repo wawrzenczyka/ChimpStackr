@@ -10,7 +10,7 @@ Open-source focus stacking application for Windows, macOS, and Linux.
 
 ## Features
 
-- **8 stacking algorithms:** Laplacian Pyramid, Weighted Average, Depth Map, Exposure Fusion (HDR), Landscape, Landscape Blend, Near/Far Cut, Landscape Regions
+- **9 stacking algorithms:** Laplacian Pyramid, Weighted Average, Depth Map, Exposure Fusion (HDR), Landscape, Landscape Blend, Near/Far Cut, Landscape Regions, Near/Far Depth
 - **Automatic alignment:** Translation, Euclidean (rotation), Similarity (rotation + scale), Affine, landscape SIFT/ECC, or optional RoMa learned matches
 - **Multiple results:** Select several methods and keep a separate result from each run for comparison and export
 - **16-bit pipeline:** Full bit-depth preservation from RAW to output
@@ -60,7 +60,7 @@ chimpstackr-cli -i foreground.tif background.tif -o result.tif \
   --method landscape,landscape_blend --bit-depth 16
 ```
 
-**Available methods:** `laplacian` (default), `weighted_average`, `depth_map`, `exposure_fusion`, `landscape`, `landscape_blend`, `near_far_cut`, `landscape_regions`. Repeat `--method` or separate method names with commas to produce separate files. `near_far_cut` accepts exactly two frames; the other landscape methods accept 2–4 frames.
+**Available methods:** `laplacian` (default), `weighted_average`, `depth_map`, `exposure_fusion`, `landscape`, `landscape_blend`, `near_far_cut`, `landscape_regions`, `landscape_depth`. Repeat `--method` or separate method names with commas to produce separate files. `near_far_cut` accepts exactly two frames; the other landscape methods accept 2–4 frames.
 
 ## Stacking Algorithms
 
@@ -74,8 +74,9 @@ chimpstackr-cli -i foreground.tif background.tif -o result.tif \
 | **Landscape Blend** | Two to four landscape frames with gentle focus transitions | The same focus map with narrow, confidence-gated seam blending |
 | **Near/Far Cut** | Two frames with distinct near and far subjects | Edge-aware binary graph cut chooses coherent focused regions while preserving original pixels |
 | **Landscape Regions** | Two to four landscape frames, including several near or far captures | Multi-label graph-cut selection favors coherent focus regions and retains clear small details |
+| **Near/Far Depth** | Two to four frames with near objects against a distant scene | Depth Anything V2 Small proposes the foreground layer; focus evidence identifies near and far sources, then original pixels are composited automatically |
 
-The two graph-cut methods use pinned PyMaxflow 1.3.2 and adapt established [graph-cut focus-segmentation ideas](https://journal.bit.edu.cn/zr/cn/article/doi/10.15918/j.tbit1001-0645.2015.06.017); they are automatic CPU alternatives, not trained SotA models. Landscape alignment estimates a robust SIFT similarity transform and refines it with ECC. Optional RoMa alignment uses learned matches to fit a guarded global similarity transform, preserving original source pixels and falling back to landscape alignment when the fit is weak. Run `pixi run -e learned gui` (CPU) or `pixi run -e learned-cuda gui` (NVIDIA CUDA 12.4 wheels), then select **RoMa (learned)**. First use downloads about 1.6 GB of pinned model weights; the CUDA environment also downloads PyTorch wheels. CPU inference is slow. Learned fusion models remain [research candidates](docs/stacking-research-plan.md) pending real-scene comparison.
+The two graph-cut methods use pinned PyMaxflow 1.3.2 and adapt established [graph-cut focus-segmentation ideas](https://journal.bit.edu.cn/zr/cn/article/doi/10.15918/j.tbit1001-0645.2015.06.017); they are automatic CPU alternatives, not trained SotA models. Near/Far Depth is our short-stack adaptation of the [Depth Anything V2 Small](https://github.com/DepthAnything/Depth-Anything-V2) depth estimator. The Apache-2.0 model code is vendored at pinned revision `a561b849ebae10a6f5ef49e26c83cbbcd36c71bf`; first use downloads its approximately 99 MB checkpoint and verifies SHA-256 before loading. Run `pixi run -e learned gui` (CPU) or `pixi run -e learned-cuda gui` (NVIDIA CUDA 12.4 wheels) to use it. A foreground bokeh halo can remain where neither source records clean background detail. Landscape alignment estimates a guarded SIFT similarity transform and refines it with ECC; when matches are unreliable, it keeps the input framing. Optional RoMa alignment uses learned matches to fit a guarded global similarity transform, falling back to landscape alignment when the fit is weak. Its first use downloads about 1.6 GB of pinned weights; CPU inference is slow. Published learned focus-fusion networks remain [research candidates](docs/stacking-research-plan.md) pending real-scene comparison.
 
 ## Build from Source
 

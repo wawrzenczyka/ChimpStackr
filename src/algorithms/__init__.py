@@ -335,30 +335,28 @@ class Algorithm:
             diagnostics["status"] = "registered"
             return result
         except (cv2.error, ValueError, AttributeError) as error:
-            # Fall back to the established similarity path, which also
-            # records a valid-pixel mask for its chosen warp.
+            # With too few shared focus features, a second unconstrained fit
+            # can move an entirely different depth plane into place. Keep the
+            # original framing when registration has no credible evidence.
             import logging
             diagnostics["status"] = "fallback"
             diagnostics["reason"] = str(error)
             logging.getLogger(__name__).warning(
-                "Landscape alignment fallback: %s; keypoints=%s/%s, "
-                "ratio_matches=%s, inliers=%s, inlier_ratio=%s",
+                "Landscape alignment skipped (%s); keeping original framing; "
+                "keypoints=%s/%s, ratio_matches=%s, inliers=%s, inlier_ratio=%s",
                 error, diagnostics.get("keypoints_reference", "?"),
                 diagnostics.get("keypoints_moving", "?"),
                 diagnostics.get("ratio_matches", "?"),
                 diagnostics.get("inliers", "?"),
                 diagnostics.get("inlier_ratio", "?"),
             )
-            if np.std(ref_small) < 1.0 or np.std(mov_small) < 1.0:
-                # Registration has no reliable signal in a nearly uniform
-                # source. The DFT fallback can produce NaNs here.
-                diagnostics["fallback_method"] = "identity_low_texture"
-                self.last_alignment_mask = np.ones(ref_im.shape[:2], dtype=bool)
-                self._track_warp_shifts(np.eye(2, 3, dtype=np.float32), im_to_align.shape)
-                return im_to_align.copy()
-            diagnostics["fallback_method"] = "similarity"
-            result = self._align_similarity(ref_im, im_to_align, scale_factor)
-            return result
+            diagnostics["fallback_method"] = (
+                "identity_low_texture" if np.std(ref_small) < 1.0 or np.std(mov_small) < 1.0
+                else "identity_unreliable_match"
+            )
+            self.last_alignment_mask = np.ones(ref_im.shape[:2], dtype=bool)
+            self._track_warp_shifts(np.eye(2, 3, dtype=np.float32), im_to_align.shape)
+            return im_to_align.copy()
 
     def _get_ref_gray(self, ref_im):
         """Get cached grayscale of reference image (avoids redundant cvtColor)."""

@@ -17,6 +17,7 @@ import src.algorithms as algorithms
 import src.algorithms.stacking_algorithms.cpu as CPU
 import src.algorithms.stacking_algorithms.landscape as Landscape
 import src.algorithms.stacking_algorithms.region_fusion as RegionFusion
+import src.algorithms.stacking_algorithms.depth_guided as DepthGuided
 from src.config import AlgorithmConfig, LANDSCAPE_METHODS
 
 try:
@@ -494,7 +495,7 @@ class LaplacianPyramid:
         if not 2 <= count <= 4:
             raise ValueError("Landscape methods require two to four images")
         if self.config.stacking_method == "near_far_cut" and count != 2:
-            raise ValueError("Near/Far Cut requires exactly two images")
+            raise ValueError(f"{self.config.stacking_method} requires exactly two images")
 
         reference = self.Algorithm.load_image(self.image_paths[0])
         if reference is None:
@@ -530,6 +531,8 @@ class LaplacianPyramid:
             image, labels, confidence = RegionFusion.fuse_near_far(images, masks, radius)
         elif self.config.stacking_method == "landscape_regions":
             image, labels, confidence = RegionFusion.fuse_regions(images, masks, radius)
+        elif self.config.stacking_method == "landscape_depth":
+            image, labels, confidence = DepthGuided.fuse_depth_guided(images, masks, radius)
         else:
             image, labels, confidence = Landscape.fuse(
                 images, masks, radius=radius,

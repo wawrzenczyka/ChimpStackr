@@ -197,6 +197,7 @@ class CenterWidget(qtw.QWidget):
                 "landscape_blend": "Landscape Blend",
                 "near_far_cut": "Near/Far Cut",
                 "landscape_regions": "Landscape Regions",
+                "landscape_depth": "Near/Far Depth",
             }
             method_short = method_names.get(method, method)
             if aligned and mainWin:

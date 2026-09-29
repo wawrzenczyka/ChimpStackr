@@ -156,3 +156,5 @@ src/_version_static.py
 
 # Claude Code per-machine settings
 .claude/settings.local.json
+
+Stacking/

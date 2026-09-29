@@ -13,6 +13,7 @@ from src.algorithms.API import LaplacianPyramid
 from src.config import AlgorithmConfig
 from src.algorithms.stacking_algorithms.landscape import fuse
 from src.algorithms.stacking_algorithms.region_fusion import fuse_near_far, fuse_regions
+from src.algorithms.stacking_algorithms import depth_guided
 
 
 def _focus_pair():
@@ -100,6 +101,60 @@ def test_near_far_cut_obeys_warp_validity_and_pair_limit():
         fuse_near_far([near, far, near])
 
 
+def test_depth_guided_selects_near_object_and_far_scene_without_source_order(monkeypatch):
+    rng = np.random.default_rng(29)
+    base = rng.integers(30, 220, (180, 240, 3)).astype(np.float32) + 0.25
+    soft = cv2.GaussianBlur(base, (0, 0), 4)
+    object_area = np.s_[35:155, 55:185]
+    far = base.copy()
+    far[object_area] = soft[object_area]
+    near = soft.copy()
+    near[object_area] = base[object_area]
+    far_depth = np.zeros(base.shape[:2], np.float32)
+    far_depth[145:] = 2
+    near_depth = np.zeros_like(far_depth)
+    near_depth[object_area] = 2
+
+    for images, maps, near_index in (([far, near], [far_depth, near_depth], 1),
+                                     ([near, far], [near_depth, far_depth], 0)):
+        remaining = iter(maps)
+        monkeypatch.setattr(depth_guided, "_infer_depth", lambda _: next(remaining))
+        result, labels, confidence = depth_guided.fuse_depth_guided(images, radius=5)
+        np.testing.assert_allclose(result[65:120, 85:155], base[65:120, 85:155])
+        np.testing.assert_allclose(result[20:25, 20:30], base[20:25, 20:30])
+        assert (labels[65:120, 85:155] == near_index).mean() > 0.95
+        assert np.isfinite(confidence).all()
+
+
+def test_depth_guided_uses_several_near_and_far_sources(monkeypatch):
+    rng = np.random.default_rng(31)
+    base = rng.integers(30, 220, (180, 240, 3)).astype(np.float32) + 0.25
+    soft = cv2.GaussianBlur(base, (0, 0), 4)
+    near_left, near_right, far_top, far_bottom = [soft.copy() for _ in range(4)]
+    near_left[35:155, 55:120] = base[35:155, 55:120]
+    near_right[35:155, 120:185] = base[35:155, 120:185]
+    far_top[:90] = base[:90]
+    far_bottom[90:] = base[90:]
+    far_top[35:155, 55:185] = soft[35:155, 55:185]
+    far_bottom[35:155, 55:185] = soft[35:155, 55:185]
+    near_depth = np.zeros(base.shape[:2], np.float32)
+    near_depth[35:155, 55:185] = 2
+    far_depth = np.zeros_like(near_depth)
+    far_depth[145:] = 2
+    remaining = iter([near_depth, near_depth, far_depth, far_depth])
+    monkeypatch.setattr(depth_guided, "_infer_depth", lambda _: next(remaining))
+
+    result, labels, _ = depth_guided.fuse_depth_guided(
+        [near_left, near_right, far_top, far_bottom], radius=5,
+    )
+    for area, index in ((np.s_[65:105, 75:100], 0),
+                        (np.s_[65:105, 145:165], 1),
+                        (np.s_[20:45, 15:35], 2),
+                        (np.s_[125:145, 15:35], 3)):
+        assert (labels[area] == index).mean() > 0.8
+        np.testing.assert_allclose(result[area], base[area], atol=0.01)
+
+
 def test_landscape_cancellation_leaves_no_output():
     algo = LaplacianPyramid(AlgorithmConfig(stacking_method="landscape"))
     algo.update_image_paths([
@@ -111,7 +166,8 @@ def test_landscape_cancellation_leaves_no_output():
 
 
 def test_auto_alignment_uses_landscape_for_landscape_methods():
-    for method in ("landscape", "landscape_blend", "near_far_cut", "landscape_regions"):
+    for method in ("landscape", "landscape_blend", "near_far_cut",
+                   "landscape_regions", "landscape_depth"):
         algo = LaplacianPyramid(AlgorithmConfig(stacking_method=method, alignment_mode="auto"))
         assert algo._resolve_alignment_mode() == "landscape"
 
@@ -145,6 +201,18 @@ def test_landscape_alignment_records_unmatchable_fallback(caplog):
     assert diagnostics["fallback_method"] == "identity_low_texture"
     assert "keypoints=0/0" in caplog.text
     assert aligned.shape == blank.shape
+
+
+def test_landscape_alignment_preserves_framing_for_unrelated_texture():
+    rng = np.random.default_rng(903)
+    reference = rng.integers(0, 256, (320, 420, 3), dtype=np.uint8).astype(np.float32)
+    moving = rng.integers(0, 256, (320, 420, 3), dtype=np.uint8).astype(np.float32)
+    algorithm = Algorithm()
+    aligned = algorithm.align_image_pair(reference, moving, alignment_mode="landscape")
+    assert algorithm.last_alignment_diagnostics["status"] == "fallback"
+    assert algorithm.last_alignment_diagnostics["fallback_method"] == "identity_unreliable_match"
+    np.testing.assert_array_equal(aligned, moving)
+    assert algorithm.last_alignment_mask.all()
 
 
 def test_roma_correspondences_fit_a_conservative_similarity(monkeypatch):

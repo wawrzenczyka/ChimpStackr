@@ -145,6 +145,7 @@ class SettingsPanel(qtw.QWidget):
             ("landscape_blend", "Landscape Blend", "Focus-aware soft transitions for landscape scenes"),
             ("near_far_cut", "Near/Far Cut", "Automatic edge-aware selection for exactly two focus planes"),
             ("landscape_regions", "Landscape Regions", "Graph-cut regions for two to four landscape frames"),
+            ("landscape_depth", "Near/Far Depth", "Learned foreground depth for two to four near/far frames (optional PyTorch)"),
         ]
         method_container = qtw.QWidget()
         method_container.setStyleSheet("background: #2a2a2a; border-radius: 8px;")
