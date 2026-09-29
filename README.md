@@ -10,8 +10,8 @@ Open-source focus stacking application for Windows, macOS, and Linux.
 
 ## Features
 
-- **6 stacking algorithms:** Laplacian Pyramid, Weighted Average, Depth Map, Exposure Fusion (HDR), Landscape, Landscape Blend
-- **Automatic alignment:** Translation, Euclidean (rotation), Similarity (rotation + scale), Affine, or landscape SIFT/ECC correction
+- **8 stacking algorithms:** Laplacian Pyramid, Weighted Average, Depth Map, Exposure Fusion (HDR), Landscape, Landscape Blend, Near/Far Cut, Landscape Regions
+- **Automatic alignment:** Translation, Euclidean (rotation), Similarity (rotation + scale), Affine, landscape SIFT/ECC, or optional RoMa learned matches
 - **Multiple results:** Select several methods and keep a separate result from each run for comparison and export
 - **16-bit pipeline:** Full bit-depth preservation from RAW to output
 - **Auto-crop:** Removes black edges from alignment shifts
@@ -60,7 +60,7 @@ chimpstackr-cli -i foreground.tif background.tif -o result.tif \
   --method landscape,landscape_blend --bit-depth 16
 ```
 
-**Available methods:** `laplacian` (default), `weighted_average`, `depth_map`, `exposure_fusion`, `landscape`, `landscape_blend`. Repeat `--method` or separate method names with commas to produce separate files. The landscape methods accept 2–4 frames; other methods can process longer stacks.
+**Available methods:** `laplacian` (default), `weighted_average`, `depth_map`, `exposure_fusion`, `landscape`, `landscape_blend`, `near_far_cut`, `landscape_regions`. Repeat `--method` or separate method names with commas to produce separate files. `near_far_cut` accepts exactly two frames; the other landscape methods accept 2–4 frames.
 
 ## Stacking Algorithms
 
@@ -72,8 +72,10 @@ chimpstackr-cli -i foreground.tif background.tif -o result.tif \
 | **HDR** | Varying exposure/lighting | Mertens exposure fusion (not for focus stacking) |
 | **Landscape** | Two to four focus-bracketed landscape frames | Multi-scale focus evidence, guided region selection, original float32 source pixels |
 | **Landscape Blend** | Two to four landscape frames with gentle focus transitions | The same focus map with narrow, confidence-gated seam blending |
+| **Near/Far Cut** | Two frames with distinct near and far subjects | Edge-aware binary graph cut chooses coherent focused regions while preserving original pixels |
+| **Landscape Regions** | Two to four landscape frames, including several near or far captures | Multi-label graph-cut selection favors coherent focus regions and retains clear small details |
 
-Landscape alignment estimates a robust SIFT similarity transform, refines it with ECC on shared texture, and retains valid-pixel masks. It is an implemented classical baseline; learned matchers and fusion models remain [research candidates](docs/stacking-research-plan.md) pending real-scene comparison. Moving foliage and parallax can still require manual review.
+The two graph-cut methods use pinned PyMaxflow 1.3.2 and adapt established [graph-cut focus-segmentation ideas](https://journal.bit.edu.cn/zr/cn/article/doi/10.15918/j.tbit1001-0645.2015.06.017); they are automatic CPU alternatives, not trained SotA models. Landscape alignment estimates a robust SIFT similarity transform and refines it with ECC. Optional RoMa alignment uses learned matches to fit a guarded global similarity transform, preserving original source pixels and falling back to landscape alignment when the fit is weak. Run `pixi run -e learned gui` (CPU) or `pixi run -e learned-cuda gui` (NVIDIA CUDA 12.4 wheels), then select **RoMa (learned)**. First use downloads about 1.6 GB of pinned model weights; the CUDA environment also downloads PyTorch wheels. CPU inference is slow. Learned fusion models remain [research candidates](docs/stacking-research-plan.md) pending real-scene comparison.
 
 ## Build from Source
 

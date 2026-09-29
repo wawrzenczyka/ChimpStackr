@@ -22,7 +22,7 @@ currentdir = os.path.dirname(os.path.realpath(__file__))
 parentdir = os.path.dirname(currentdir)
 sys.path.insert(0, parentdir)
 
-from src.config import AlgorithmConfig, AppConfig, auto_detect_params
+from src.config import AlgorithmConfig, AppConfig, LANDSCAPE_METHODS, STACKING_METHODS, auto_detect_params
 import src.settings as settings
 from src.algorithms.API import LaplacianPyramid
 from src.ImageLoadingHandler import ImageLoadingHandler
@@ -79,16 +79,17 @@ def parse_args():
         action="append",
         default=None,
         metavar="METHOD[,METHOD...]",
-        help="Stacking method(s): laplacian, weighted_average, depth_map, exposure_fusion, landscape, landscape_blend. "
+        help="Stacking method(s): " + ", ".join(STACKING_METHODS) + ". "
              "Repeat --method or use comma-separated values for separate outputs (default: laplacian)",
     )
     parser.add_argument(
         "--alignment-mode",
-        choices=["translation", "euclidean", "similarity", "affine", "landscape"],
+        choices=["translation", "euclidean", "similarity", "affine", "landscape", "roma"],
         default=None,
         help="Alignment mode: translation (shift only), euclidean (shift+rotation), "
              "similarity (shift+rotation+scale, default with --align), "
-             "affine (full 6 DOF for extreme cases), landscape (wide-scene alignment)",
+             "affine (full 6 DOF for extreme cases), landscape (wide-scene alignment), "
+             "roma (optional learned matcher)",
     )
     parser.add_argument(
         "--rotation-scale",
@@ -159,7 +160,7 @@ def expand_input_paths(patterns):
 def _selected_methods(values):
     methods = [part.strip() for value in (values or ["laplacian"])
                for part in value.split(",") if part.strip()]
-    allowed = {"laplacian", "weighted_average", "depth_map", "exposure_fusion", "landscape", "landscape_blend"}
+    allowed = set(STACKING_METHODS)
     invalid = [method for method in methods if method not in allowed]
     if invalid or not methods:
         raise ValueError("invalid --method value(s): " + ", ".join(invalid or ["empty"]))
@@ -255,7 +256,7 @@ def main():
         alignment_mode = (
             args.alignment_mode or
             ("similarity" if args.rotation_scale else
-             "landscape" if method in ("landscape", "landscape_blend") else "similarity")
+             "landscape" if method in LANDSCAPE_METHODS else "similarity")
         ) if args.align else "translation"
         print(f"  Method: {method}")
         if args.align:

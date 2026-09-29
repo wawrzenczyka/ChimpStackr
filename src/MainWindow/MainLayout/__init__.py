@@ -195,6 +195,8 @@ class CenterWidget(qtw.QWidget):
                 "exposure_fusion": "Mertens",
                 "landscape": "Landscape",
                 "landscape_blend": "Landscape Blend",
+                "near_far_cut": "Near/Far Cut",
+                "landscape_regions": "Landscape Regions",
             }
             method_short = method_names.get(method, method)
             if aligned and mainWin:
@@ -205,6 +207,7 @@ class CenterWidget(qtw.QWidget):
                     "similarity": "Simil",
                     "affine": "Affine",
                     "landscape": "Landscape",
+                    "roma": "RoMa",
                 }
                 align_tag = f"_{mode_names.get(mode, mode)}"
             else:

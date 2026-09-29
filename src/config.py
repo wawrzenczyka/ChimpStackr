@@ -25,8 +25,12 @@ SUPPORTED_RAW_FORMATS = [
 
 STACKING_METHODS = [
     "laplacian", "weighted_average", "depth_map", "exposure_fusion",
-    "landscape", "landscape_blend",
+    "landscape", "landscape_blend", "near_far_cut", "landscape_regions",
 ]
+
+LANDSCAPE_METHODS = (
+    "landscape", "landscape_blend", "near_far_cut", "landscape_regions",
+)
 
 
 def auto_detect_params(image_shape, num_images):

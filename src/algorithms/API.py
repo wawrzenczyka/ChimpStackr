@@ -16,7 +16,8 @@ import src.utilities as utilities
 import src.algorithms as algorithms
 import src.algorithms.stacking_algorithms.cpu as CPU
 import src.algorithms.stacking_algorithms.landscape as Landscape
-from src.config import AlgorithmConfig
+import src.algorithms.stacking_algorithms.region_fusion as RegionFusion
+from src.config import AlgorithmConfig, LANDSCAPE_METHODS
 
 try:
     import src.algorithms.stacking_algorithms.gpu as _GPU_module
@@ -115,7 +116,7 @@ class LaplacianPyramid:
         mode = self.config.alignment_mode
         if mode != "auto":
             return mode
-        if self.config.stacking_method in ("landscape", "landscape_blend"):
+        if self.config.stacking_method in LANDSCAPE_METHODS:
             return "landscape"
         # Legacy: align_rotation_scale boolean → similarity (upgraded from old euclidean)
         if self.config.align_rotation_scale:
@@ -137,7 +138,7 @@ class LaplacianPyramid:
         method = self.config.stacking_method
         if method == "weighted_average":
             self._align_and_stack_weighted_average(signals, progress_callback)
-        elif method in ("landscape", "landscape_blend"):
+        elif method in LANDSCAPE_METHODS:
             self._align_and_stack_landscape(signals, progress_callback)
         elif method == "depth_map":
             self._align_and_stack_depthmap(signals, progress_callback)
@@ -151,7 +152,7 @@ class LaplacianPyramid:
         method = self.config.stacking_method
         if method == "weighted_average":
             self._stack_weighted_average(signals, progress_callback)
-        elif method in ("landscape", "landscape_blend"):
+        elif method in LANDSCAPE_METHODS:
             self._stack_landscape(signals, progress_callback)
         elif method == "depth_map":
             self._stack_depthmap(signals, progress_callback)
@@ -492,6 +493,8 @@ class LaplacianPyramid:
         count = len(self.image_paths)
         if not 2 <= count <= 4:
             raise ValueError("Landscape methods require two to four images")
+        if self.config.stacking_method == "near_far_cut" and count != 2:
+            raise ValueError("Near/Far Cut requires exactly two images")
 
         reference = self.Algorithm.load_image(self.image_paths[0])
         if reference is None:
@@ -522,10 +525,16 @@ class LaplacianPyramid:
         if self.Algorithm.is_cancelled:
             return
         started = time.time()
-        image, labels, confidence = Landscape.fuse(
-            images, masks, radius=max(3, self.fusion_kernel_size),
-            blend=self.config.stacking_method == "landscape_blend",
-        )
+        radius = max(3, self.fusion_kernel_size)
+        if self.config.stacking_method == "near_far_cut":
+            image, labels, confidence = RegionFusion.fuse_near_far(images, masks, radius)
+        elif self.config.stacking_method == "landscape_regions":
+            image, labels, confidence = RegionFusion.fuse_regions(images, masks, radius)
+        else:
+            image, labels, confidence = Landscape.fuse(
+                images, masks, radius=radius,
+                blend=self.config.stacking_method == "landscape_blend",
+            )
         if self.Algorithm.is_cancelled:
             return
         self.output_image = image

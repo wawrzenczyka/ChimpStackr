@@ -7,6 +7,7 @@ numpy>=1.23,<3.0
 numba>=0.56
 rawpy>=0.18
 imageio>=2.29
+PyMaxflow==1.3.2
 
 # Alignment / FFT
 scipy>=1.10

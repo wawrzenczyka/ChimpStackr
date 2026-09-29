@@ -143,6 +143,8 @@ class SettingsPanel(qtw.QWidget):
             ("exposure_fusion", "HDR", "Exposure/HDR fusion\n(varying lighting, not focus)"),
             ("landscape", "Landscape", "Focus stack optimized for landscape scenes"),
             ("landscape_blend", "Landscape Blend", "Focus-aware soft transitions for landscape scenes"),
+            ("near_far_cut", "Near/Far Cut", "Automatic edge-aware selection for exactly two focus planes"),
+            ("landscape_regions", "Landscape Regions", "Graph-cut regions for two to four landscape frames"),
         ]
         method_container = qtw.QWidget()
         method_container.setStyleSheet("background: #2a2a2a; border-radius: 8px;")
@@ -319,8 +321,8 @@ class SettingsPanel(qtw.QWidget):
             "middle: align all to middle image")
 
         self.alignment_mode_combo = qtw.QComboBox()
-        self.alignment_mode_combo.addItems(["Auto (by method)", "Similarity", "Euclidean", "Full Affine", "Landscape", "Translation"])
-        mode_map = {"auto": 0, "similarity": 1, "euclidean": 2, "affine": 3, "landscape": 4, "translation": 5}
+        self.alignment_mode_combo.addItems(["Auto (by method)", "Similarity", "Euclidean", "Full Affine", "Landscape", "Translation", "RoMa (learned)"])
+        mode_map = {"auto": 0, "similarity": 1, "euclidean": 2, "affine": 3, "landscape": 4, "translation": 5, "roma": 6}
         saved_mode = settings.globalVars["QSettings"].value("algorithm/alignment_mode") or "auto"
         self.alignment_mode_combo.setCurrentIndex(mode_map.get(saved_mode, 0))
         self.alignment_mode_combo.currentIndexChanged.connect(self._on_alignment_mode_changed)
@@ -329,7 +331,8 @@ class SettingsPanel(qtw.QWidget):
             "Similarity (4 DOF): shift, rotation, uniform scale\n"
             "Euclidean (3 DOF): shift, rotation only — no scale correction\n"
             "Full Affine (6 DOF): shift, rotation, scale, shear — for extreme cases\n"
-            "Landscape: alignment tuned for landscape focus stacks")
+            "Landscape: alignment tuned for landscape focus stacks\n"
+            "RoMa: optional learned matches with a guarded similarity warp")
 
         self.autocrop_checkbox = qtw.QCheckBox()
         self.autocrop_checkbox.setChecked(
@@ -408,7 +411,7 @@ class SettingsPanel(qtw.QWidget):
 
     def _on_alignment_mode_changed(self, index):
         """Handle alignment mode dropdown change."""
-        mode_keys = ["auto", "similarity", "euclidean", "affine", "landscape", "translation"]
+        mode_keys = ["auto", "similarity", "euclidean", "affine", "landscape", "translation", "roma"]
         if 0 <= index < len(mode_keys):
             self.change_setting("algorithm/alignment_mode", mode_keys[index])
 

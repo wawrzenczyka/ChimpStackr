@@ -22,6 +22,7 @@ except ImportError:
 import src.algorithms.dft_imreg as dft_imreg
 import src.ImageLoadingHandler as ImageLoadingHandler
 import src.algorithms.stacking_algorithms.cpu as CPU
+import src.algorithms.learned_alignment as learned_alignment
 
 try:
     import src.algorithms.stacking_algorithms.gpu as GPU
@@ -42,6 +43,7 @@ class Algorithm:
         self.alignment_shifts = []  # Track all (x, y) shifts for auto-crop
         self._ref_gray_cache = (None, None)  # (id(ref_im), gray) cache
         self.last_alignment_mask = None
+        self.last_alignment_diagnostics = {}
 
     def cancel(self):
         self._cancel_event.set()
@@ -120,10 +122,11 @@ class Algorithm:
         Align im_to_align to ref_im.
         Returns float32 aligned image.
 
-        alignment_mode: "translation", "euclidean", "similarity", "affine", "landscape"
+        alignment_mode: "translation", "euclidean", "similarity", "affine", "landscape", "roma"
         use_rst: legacy flag — if True and alignment_mode not explicitly set, uses euclidean
         """
         self.last_alignment_mask = None
+        self.last_alignment_diagnostics = {}
         # Handle path loading
         if isinstance(ref_im, str) and isinstance(im_to_align, str) and ref_im == im_to_align:
             image = self.load_image(im_to_align)
@@ -144,6 +147,8 @@ class Algorithm:
 
         if alignment_mode == "landscape":
             result = self._align_landscape(ref_im, im_to_align, scale_factor)
+        elif alignment_mode == "roma":
+            result = self._align_roma(ref_im, im_to_align, scale_factor)
         elif alignment_mode == "similarity":
             result = self._align_similarity(ref_im, im_to_align, scale_factor)
         elif alignment_mode == "affine":
@@ -154,6 +159,60 @@ class Algorithm:
             result = self._align_translation(ref_im, im_to_align, scale_factor, coarse_fine)
 
         return result
+
+    def _align_roma(self, ref_im, im_to_align, scale_factor):
+        """Fit a guarded global similarity from RoMa's dense correspondences."""
+        diagnostics = {"mode": "roma", "status": "matching"}
+        self.last_alignment_diagnostics = diagnostics
+        try:
+            points_ref, points_mov, certainty = learned_alignment.correspondences(
+                ref_im, im_to_align,
+            )
+            diagnostics["matches"] = len(points_ref)
+            if len(points_ref) < 12:
+                raise ValueError("RoMa produced too few matches")
+            # Preserve the best high-confidence matches while leaving enough
+            # spatial candidates for the robust fit.
+            threshold = np.quantile(certainty, 0.35)
+            selected = certainty >= threshold
+            points_ref = points_ref[selected]
+            points_mov = points_mov[selected]
+            diagnostics["selected_matches"] = len(points_ref)
+            # Correspondences are returned in original-image pixels. A fixed
+            # three-pixel threshold is too strict for a 6000-pixel landscape.
+            reprojection_threshold = max(3.0, 2.5 * max(ref_im.shape[:2]) / 2048.0)
+            warp, inliers = cv2.estimateAffinePartial2D(
+                points_ref, points_mov, method=cv2.RANSAC,
+                ransacReprojThreshold=reprojection_threshold,
+                maxIters=5000, confidence=0.995,
+            )
+            diagnostics["reprojection_threshold"] = reprojection_threshold
+            count = int(inliers.sum()) if inliers is not None else 0
+            diagnostics["inliers"] = count
+            diagnostics["inlier_ratio"] = count / len(points_ref)
+            if warp is None or count < 12 or diagnostics["inlier_ratio"] < 0.25:
+                raise ValueError("RoMa similarity fit has too few reliable inliers")
+            scale = float(np.hypot(warp[0, 0], warp[1, 0]))
+            diagnostics["scale"] = scale
+            if not 0.75 < scale < 1.33:
+                raise ValueError("RoMa similarity scale is implausible")
+            h, w = ref_im.shape[:2]
+            result = cv2.warpAffine(
+                im_to_align, warp, (w, h),
+                flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+            )
+            self.last_alignment_mask = self._valid_mask_for_warp(warp, im_to_align.shape)
+            self._track_warp_shifts(warp, im_to_align.shape)
+            diagnostics["status"] = "registered"
+            return result
+        except (cv2.error, ValueError) as error:
+            import logging
+            logging.getLogger(__name__).warning("RoMa alignment fallback: %s", error)
+            result = self._align_landscape(ref_im, im_to_align, scale_factor)
+            self.last_alignment_diagnostics["requested_mode"] = "roma"
+            self.last_alignment_diagnostics["roma_reason"] = str(error)
+            return result
 
     def _align_landscape(self, ref_im, im_to_align, scale_factor):
         """Focus-aware SIFT similarity alignment with guarded ECC refinement.
@@ -176,15 +235,20 @@ class Algorithm:
             ref_small, mov_small = ref, moving
             sx = sy = 1.0
 
+        diagnostics = {"mode": "landscape", "status": "matching"}
+        self.last_alignment_diagnostics = diagnostics
         try:
             sift = cv2.SIFT_create(nfeatures=5000)
             kp_ref, des_ref = sift.detectAndCompute(ref_small, None)
             kp_mov, des_mov = sift.detectAndCompute(mov_small, None)
+            diagnostics["keypoints_reference"] = len(kp_ref or ())
+            diagnostics["keypoints_moving"] = len(kp_mov or ())
             if des_ref is None or des_mov is None:
                 raise ValueError("No stable focus-overlap features")
             matches = cv2.BFMatcher(cv2.NORM_L2).knnMatch(des_ref, des_mov, k=2)
             good = [m for pair in matches if len(pair) == 2
                     for m, n in [pair] if m.distance < 0.7 * n.distance]
+            diagnostics["ratio_matches"] = len(good)
             if len(good) < 12:
                 raise ValueError("Too few shared features")
 
@@ -194,10 +258,14 @@ class Algorithm:
                 points_ref, points_mov, method=cv2.RANSAC,
                 ransacReprojThreshold=2.5, maxIters=4000, confidence=0.995,
             )
-            if coarse is None or inliers is None or int(inliers.sum()) < 12:
+            inlier_count = int(inliers.sum()) if inliers is not None else 0
+            diagnostics["inliers"] = inlier_count
+            diagnostics["inlier_ratio"] = inlier_count / len(good)
+            if coarse is None or inlier_count < 12:
                 raise ValueError("Similarity fit has too few inliers")
-            ratio = int(inliers.sum()) / len(good)
+            ratio = diagnostics["inlier_ratio"]
             fit_scale = float(np.hypot(coarse[0, 0], coarse[1, 0]))
+            diagnostics["scale"] = fit_scale
             if ratio < 0.3 or not 0.75 < fit_scale < 1.33:
                 raise ValueError("Similarity fit is implausible")
 
@@ -264,12 +332,31 @@ class Algorithm:
                 borderMode=cv2.BORDER_CONSTANT, borderValue=0,
             ).astype(bool)
             self._track_warp_shifts(full, im_to_align.shape)
+            diagnostics["status"] = "registered"
             return result
         except (cv2.error, ValueError, AttributeError) as error:
-            # Fall back to the established path, and flag the border of its
-            # image as unknown until transform replay is available there.
+            # Fall back to the established similarity path, which also
+            # records a valid-pixel mask for its chosen warp.
             import logging
-            logging.getLogger(__name__).warning("Landscape alignment fallback: %s", error)
+            diagnostics["status"] = "fallback"
+            diagnostics["reason"] = str(error)
+            logging.getLogger(__name__).warning(
+                "Landscape alignment fallback: %s; keypoints=%s/%s, "
+                "ratio_matches=%s, inliers=%s, inlier_ratio=%s",
+                error, diagnostics.get("keypoints_reference", "?"),
+                diagnostics.get("keypoints_moving", "?"),
+                diagnostics.get("ratio_matches", "?"),
+                diagnostics.get("inliers", "?"),
+                diagnostics.get("inlier_ratio", "?"),
+            )
+            if np.std(ref_small) < 1.0 or np.std(mov_small) < 1.0:
+                # Registration has no reliable signal in a nearly uniform
+                # source. The DFT fallback can produce NaNs here.
+                diagnostics["fallback_method"] = "identity_low_texture"
+                self.last_alignment_mask = np.ones(ref_im.shape[:2], dtype=bool)
+                self._track_warp_shifts(np.eye(2, 3, dtype=np.float32), im_to_align.shape)
+                return im_to_align.copy()
+            diagnostics["fallback_method"] = "similarity"
             result = self._align_similarity(ref_im, im_to_align, scale_factor)
             return result
 
@@ -384,7 +471,7 @@ class Algorithm:
 
         except cv2.error:
             # ECC failed — fall back to translation-only DFT
-            return self._align_translation(ref_im, im_to_align, scale_factor)
+            return self._align_translation(ref_im, im_to_align, scale_factor, False)
 
         # Apply the warp to the full-resolution color image
         h, w = im_to_align.shape[:2]

@@ -25,6 +25,8 @@ def test_gui_multiselect_results_and_selection(tmp_path):
         paths = ["tests/low_res_images/DSC_0356.jpg", "tests/low_res_images/DSC_0358.jpg"]
         window.set_new_loaded_image_files(paths)
         buttons = window.SettingsWidget._method_buttons
+        assert "near_far_cut" in buttons
+        assert "landscape_regions" in buttons
         buttons["landscape"].click()
         buttons["laplacian"].click()
         buttons["landscape_blend"].click()
