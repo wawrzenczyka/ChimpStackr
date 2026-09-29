@@ -15,6 +15,7 @@ import numpy as np
 import src.utilities as utilities
 import src.algorithms as algorithms
 import src.algorithms.stacking_algorithms.cpu as CPU
+import src.algorithms.stacking_algorithms.landscape as Landscape
 from src.config import AlgorithmConfig
 
 try:
@@ -35,6 +36,7 @@ class LaplacianPyramid:
         self.config = config
         self.output_image = None
         self.depth_map = None  # Populated by depth_map method
+        self.focus_confidence = None  # Populated by landscape methods
         self.image_paths = []
         self.Algorithm = algorithms.Algorithm()
 
@@ -113,6 +115,8 @@ class LaplacianPyramid:
         mode = self.config.alignment_mode
         if mode != "auto":
             return mode
+        if self.config.stacking_method in ("landscape", "landscape_blend"):
+            return "landscape"
         # Legacy: align_rotation_scale boolean → similarity (upgraded from old euclidean)
         if self.config.align_rotation_scale:
             return "similarity"
@@ -133,6 +137,8 @@ class LaplacianPyramid:
         method = self.config.stacking_method
         if method == "weighted_average":
             self._align_and_stack_weighted_average(signals, progress_callback)
+        elif method in ("landscape", "landscape_blend"):
+            self._align_and_stack_landscape(signals, progress_callback)
         elif method == "depth_map":
             self._align_and_stack_depthmap(signals, progress_callback)
         elif method == "exposure_fusion":
@@ -145,6 +151,8 @@ class LaplacianPyramid:
         method = self.config.stacking_method
         if method == "weighted_average":
             self._stack_weighted_average(signals, progress_callback)
+        elif method in ("landscape", "landscape_blend"):
+            self._stack_landscape(signals, progress_callback)
         elif method == "depth_map":
             self._stack_depthmap(signals, progress_callback)
         elif method == "exposure_fusion":
@@ -471,6 +479,66 @@ class LaplacianPyramid:
         self.output_image = CPU.local_tone_map(self.output_image, strength=0.3)
         logger.info(f"[CuPy GPU] Reconstruct+tonemap: {time.time()-t_recon:.3f}s")
         logger.info(f"[CuPy GPU] Total: {time.time()-t_start:.2f}s")
+
+    # ─── Landscape Methods (short stacks) ───
+
+    def _landscape_core(self, align, signals=None, progress_callback=None):
+        """Load two to four frames and keep a full-precision focus decision."""
+        self.Algorithm.reset_cancel()
+        self.Algorithm.alignment_shifts = []
+        self.output_image = None
+        self.depth_map = None
+        self.focus_confidence = None
+        count = len(self.image_paths)
+        if not 2 <= count <= 4:
+            raise ValueError("Landscape methods require two to four images")
+
+        reference = self.Algorithm.load_image(self.image_paths[0])
+        if reference is None:
+            raise ValueError(f"Could not read {self.image_paths[0]}")
+        images = [reference]
+        masks = [np.ones(reference.shape[:2], dtype=bool)]
+        self._emit_progress(signals, progress_callback, 1, count + 1, 0.0)
+
+        for i, path in enumerate(self.image_paths[1:], start=1):
+            self.Algorithm.wait_if_paused()
+            if self.Algorithm.is_cancelled:
+                return
+            started = time.time()
+            image = self._load_and_align(reference, path) if align else self.Algorithm.load_image(path)
+            if image is None:
+                raise ValueError(f"Could not read {path}")
+            if image.shape != reference.shape:
+                raise ValueError("Landscape images must have matching dimensions")
+            images.append(image)
+            mask = self.Algorithm.last_alignment_mask if align else None
+            if mask is None or mask.shape != reference.shape[:2]:
+                mask = np.ones(reference.shape[:2], dtype=bool)
+            masks.append(mask)
+            self._emit_progress(signals, progress_callback, i + 1, count + 1,
+                                time.time() - started)
+
+        self.Algorithm.wait_if_paused()
+        if self.Algorithm.is_cancelled:
+            return
+        started = time.time()
+        image, labels, confidence = Landscape.fuse(
+            images, masks, radius=max(3, self.fusion_kernel_size),
+            blend=self.config.stacking_method == "landscape_blend",
+        )
+        if self.Algorithm.is_cancelled:
+            return
+        self.output_image = image
+        self.depth_map = labels
+        self.focus_confidence = confidence
+        self._emit_progress(signals, progress_callback, count + 1, count + 1,
+                            time.time() - started)
+
+    def _align_and_stack_landscape(self, signals=None, progress_callback=None):
+        self._landscape_core(True, signals, progress_callback)
+
+    def _stack_landscape(self, signals=None, progress_callback=None):
+        self._landscape_core(False, signals, progress_callback)
 
     # ─── Weighted Average Method ───
     #

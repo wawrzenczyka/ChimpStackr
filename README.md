@@ -10,8 +10,9 @@ Open-source focus stacking application for Windows, macOS, and Linux.
 
 ## Features
 
-- **4 stacking algorithms:** Laplacian Pyramid, Weighted Average, Depth Map, Exposure Fusion (HDR)
-- **Automatic alignment:** Translation, Euclidean (rotation), Similarity (rotation + scale, for focus breathing), or Affine correction
+- **6 stacking algorithms:** Laplacian Pyramid, Weighted Average, Depth Map, Exposure Fusion (HDR), Landscape, Landscape Blend
+- **Automatic alignment:** Translation, Euclidean (rotation), Similarity (rotation + scale), Affine, or landscape SIFT/ECC correction
+- **Multiple results:** Select several methods and keep a separate result from each run for comparison and export
 - **16-bit pipeline:** Full bit-depth preservation from RAW to output
 - **Auto-crop:** Removes black edges from alignment shifts
 - **Auto-tuning:** Parameters auto-detected from image resolution
@@ -51,9 +52,15 @@ chimpstackr-cli -i images/*.jpg -o result.png \
   --pyramid-levels 8 \
   --auto-crop \
   --quality-report
+
+# Compare two landscape methods on the same pair; writes result_landscape.tif
+# and result_landscape_blend.tif
+chimpstackr-cli -i foreground.tif background.tif -o result.tif \
+  --align --alignment-mode landscape \
+  --method landscape,landscape_blend --bit-depth 16
 ```
 
-**Available methods:** `laplacian` (default), `weighted_average`, `depth_map`
+**Available methods:** `laplacian` (default), `weighted_average`, `depth_map`, `exposure_fusion`, `landscape`, `landscape_blend`. Repeat `--method` or separate method names with commas to produce separate files. The landscape methods accept 2–4 frames; other methods can process longer stacks.
 
 ## Stacking Algorithms
 
@@ -63,10 +70,34 @@ chimpstackr-cli -i images/*.jpg -o result.png \
 | **Weighted** | Smooth subjects, good color | Per-pixel contrast weighting with proper accumulation |
 | **Depth Map** | Opaque surfaces, best color fidelity | Multi-scale sharpness with edge-aware bilateral smoothing |
 | **HDR** | Varying exposure/lighting | Mertens exposure fusion (not for focus stacking) |
+| **Landscape** | Two to four focus-bracketed landscape frames | Multi-scale focus evidence, guided region selection, original float32 source pixels |
+| **Landscape Blend** | Two to four landscape frames with gentle focus transitions | The same focus map with narrow, confidence-gated seam blending |
+
+Landscape alignment estimates a robust SIFT similarity transform, refines it with ECC on shared texture, and retains valid-pixel masks. It is an implemented classical baseline; learned matchers and fusion models remain [research candidates](docs/stacking-research-plan.md) pending real-scene comparison. Moving foliage and parallax can still require manual review.
 
 ## Build from Source
 
-Requires Python 3.9-3.13.
+The Pixi environment uses Python 3.11–3.12 on Windows. The pip workflow retains the versions supported by `requirements.txt`.
+
+### Pixi
+
+Install [Pixi](https://pixi.sh/latest/#installation), then run commands from the project directory. Pixi creates and manages the project environment automatically:
+
+```bash
+# Run the GUI
+pixi run gui
+
+# Show CLI options, or run the CLI with arguments
+pixi run cli-help
+pixi run cli -- --input images/*.jpg --output result.tif
+
+# Run the test suite in the environment that includes pytest
+pixi run --environment dev test
+```
+
+The default environment contains the application runtime dependencies. The `dev` environment adds pytest. The current `pixi.toml` targets Windows; use the pip workflow on macOS or Linux. On Windows, use PowerShell syntax for paths and wildcard arguments as needed.
+
+### pip / virtualenv
 
 ```bash
 git clone https://github.com/noah-peeters/ChimpStackr.git

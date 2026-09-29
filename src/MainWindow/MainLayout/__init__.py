@@ -83,6 +83,8 @@ class CenterWidget(qtw.QWidget):
         if list_widget_item:
             path = list_widget_item.data(qtc.Qt.UserRole)
             if path and os.path.isfile(path):
+                if list_widget_item.listWidget() == self.ImageWidgets.processed_images_widget.list:
+                    settings.globalVars["MainWindow"].select_result(path)
                 self._pending_preview_path = path
                 self._pending_is_source = (
                     list_widget_item.listWidget()
@@ -191,6 +193,8 @@ class CenterWidget(qtw.QWidget):
                 "weighted_average": "WeightedAvg",
                 "depth_map": "DepthMap",
                 "exposure_fusion": "Mertens",
+                "landscape": "Landscape",
+                "landscape_blend": "Landscape Blend",
             }
             method_short = method_names.get(method, method)
             if aligned and mainWin:
@@ -200,6 +204,7 @@ class CenterWidget(qtw.QWidget):
                     "euclidean": "Euclid",
                     "similarity": "Simil",
                     "affine": "Affine",
+                    "landscape": "Landscape",
                 }
                 align_tag = f"_{mode_names.get(mode, mode)}"
             else:
@@ -215,7 +220,7 @@ class CenterWidget(qtw.QWidget):
                         "Error: Failed to save output image", 5000)
                 except (KeyError, AttributeError):
                     pass
-                return
+                return None
             os.close(file_handle)
 
             # Add thumbnail to output item
@@ -246,3 +251,4 @@ class CenterWidget(qtw.QWidget):
                 if before_img is not None:
                     before_rgb = cv2.cvtColor(before_img, cv2.COLOR_BGR2RGB)
                     self.ComparisonViewer.set_before_image(before_rgb)
+            return tmp_file

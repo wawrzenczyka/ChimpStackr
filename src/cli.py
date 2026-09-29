@@ -76,17 +76,19 @@ def parse_args():
     )
     parser.add_argument(
         "--method",
-        choices=["laplacian", "weighted_average", "depth_map"],
-        default="laplacian",
-        help="Stacking method (default: laplacian)",
+        action="append",
+        default=None,
+        metavar="METHOD[,METHOD...]",
+        help="Stacking method(s): laplacian, weighted_average, depth_map, exposure_fusion, landscape, landscape_blend. "
+             "Repeat --method or use comma-separated values for separate outputs (default: laplacian)",
     )
     parser.add_argument(
         "--alignment-mode",
-        choices=["translation", "euclidean", "similarity", "affine"],
+        choices=["translation", "euclidean", "similarity", "affine", "landscape"],
         default=None,
         help="Alignment mode: translation (shift only), euclidean (shift+rotation), "
              "similarity (shift+rotation+scale, default with --align), "
-             "affine (full 6 DOF for extreme cases)",
+             "affine (full 6 DOF for extreme cases), landscape (wide-scene alignment)",
     )
     parser.add_argument(
         "--rotation-scale",
@@ -154,6 +156,21 @@ def expand_input_paths(patterns):
     return sorted(set(paths))
 
 
+def _selected_methods(values):
+    methods = [part.strip() for value in (values or ["laplacian"])
+               for part in value.split(",") if part.strip()]
+    allowed = {"laplacian", "weighted_average", "depth_map", "exposure_fusion", "landscape", "landscape_blend"}
+    invalid = [method for method in methods if method not in allowed]
+    if invalid or not methods:
+        raise ValueError("invalid --method value(s): " + ", ".join(invalid or ["empty"]))
+    return list(dict.fromkeys(methods))
+
+
+def _method_output_path(output, method):
+    root, ext = os.path.splitext(output)
+    return f"{root}_{method}{ext}"
+
+
 class ProgressTracker:
     """CLI progress display with bar, ETA, and speed."""
     def __init__(self):
@@ -194,9 +211,28 @@ def main():
         print(f"Error: Need at least 2 images, got {len(input_paths)}", file=sys.stderr)
         sys.exit(1)
 
+    try:
+        methods = _selected_methods(args.method)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(2)
+    output_paths = ([args.output] if len(methods) == 1 else
+                    [_method_output_path(args.output, method) for method in methods])
+    if len(methods) > 1:
+        source_paths = {os.path.normcase(os.path.abspath(path)) for path in input_paths}
+        collisions = [path for path in output_paths
+                      if os.path.normcase(os.path.abspath(path)) in source_paths]
+        if collisions:
+            print("Error: Multi-method output would overwrite an input image: " +
+                  ", ".join(collisions), file=sys.stderr)
+            sys.exit(1)
+
     print(f"ChimpStackr CLI - Focus Stacking")
     print(f"  Input: {len(input_paths)} images")
-    print(f"  Output: {args.output}")
+    if len(methods) == 1:
+        print(f"  Output: {output_paths[0]}")
+    else:
+        print("  Outputs: " + ", ".join(output_paths))
     print(f"  Mode: {'Align + Stack' if args.align else 'Stack only'}")
     # Auto-detect parameters from first image if requested
     kernel_size = args.kernel_size
@@ -214,112 +250,115 @@ def main():
             print(f"  Auto-detected: kernel={kernel_size}, levels={pyramid_levels}, scale={scale_factor}")
             del sample
 
-    print(f"  Method: {args.method}")
     print(f"  Kernel size: {kernel_size}, Pyramid levels: {pyramid_levels}")
-    # Resolve alignment mode
-    alignment_mode = args.alignment_mode or ("similarity" if args.rotation_scale else "similarity")
-    if not args.align:
-        alignment_mode = "translation"
+    for method, output_path in zip(methods, output_paths):
+        alignment_mode = (
+            args.alignment_mode or
+            ("similarity" if args.rotation_scale else
+             "landscape" if method in ("landscape", "landscape_blend") else "similarity")
+        ) if args.align else "translation"
+        print(f"  Method: {method}")
+        if args.align:
+            print(f"  Alignment: ref={args.alignment_ref}, scale={scale_factor}, mode={alignment_mode}")
+        if len(methods) > 1:
+            print(f"  Writing: {output_path}")
 
-    if args.align:
-        print(f"  Alignment: ref={args.alignment_ref}, scale={scale_factor}, mode={alignment_mode}")
+        # Configure algorithm
+        config = AlgorithmConfig(
+            stacking_method=method,
+            fusion_kernel_size=kernel_size,
+            pyramid_num_levels=pyramid_levels,
+            alignment_scale_factor=scale_factor,
+            use_gpu=args.gpu,
+            selected_gpu_id=args.gpu_id,
+            alignment_reference=args.alignment_ref,
+            align_rotation_scale=alignment_mode in ("euclidean", "similarity", "affine"),
+            alignment_mode=alignment_mode,
+        )
 
-    # Configure algorithm
-    config = AlgorithmConfig(
-        stacking_method=args.method,
-        fusion_kernel_size=kernel_size,
-        pyramid_num_levels=pyramid_levels,
-        alignment_scale_factor=scale_factor,
-        use_gpu=args.gpu,
-        selected_gpu_id=args.gpu_id,
-        alignment_reference=args.alignment_ref,
-        align_rotation_scale=alignment_mode in ("euclidean", "similarity", "affine"),
-        alignment_mode=alignment_mode,
-    )
+        algo = LaplacianPyramid(config=config)
+        algo.update_image_paths(input_paths)
 
-    algo = LaplacianPyramid(config=config)
-    algo.update_image_paths(input_paths)
+        # Quality report on inputs
+        if args.quality_report:
+            loader = ImageLoadingHandler()
+            print("\n  Input image sharpness:")
+            for path in input_paths:
+                img = loader.read_image_from_path(path)
+                if img is not None:
+                    sharpness = ImageLoadingHandler.compute_sharpness(img)
+                    print(f"    {os.path.basename(path)}: {sharpness:.1f}")
 
-    # Quality report on inputs
-    if args.quality_report:
-        loader = ImageLoadingHandler()
-        print("\n  Input image sharpness:")
-        for path in input_paths:
-            img = loader.read_image_from_path(path)
-            if img is not None:
-                sharpness = ImageLoadingHandler.compute_sharpness(img)
-                print(f"    {os.path.basename(path)}: {sharpness:.1f}")
+        # Run stacking
+        print()
+        progress = ProgressTracker()
+        total_start = time.time()
 
-    # Run stacking
-    print()
-    progress = ProgressTracker()
-    total_start = time.time()
+        if args.align:
+            algo.align_and_stack_images(progress_callback=progress)
+        else:
+            algo.stack_images(progress_callback=progress)
 
-    if args.align:
-        algo.align_and_stack_images(progress_callback=progress)
-    else:
-        algo.stack_images(progress_callback=progress)
+        total_elapsed = time.time() - total_start
 
-    total_elapsed = time.time() - total_start
+        if algo.output_image is None:
+            print("Error: Stacking failed or was cancelled", file=sys.stderr)
+            sys.exit(1)
 
-    if algo.output_image is None:
-        print("Error: Stacking failed or was cancelled", file=sys.stderr)
-        sys.exit(1)
+        # Auto-crop if requested
+        if args.auto_crop and args.align:
+            bounds = algo.auto_crop_output()
+            if bounds:
+                top, bottom, left, right = bounds
+                print(f"  Auto-cropped: {top}px top, {bottom}px bottom, {left}px left, {right}px right")
 
-    # Auto-crop if requested
-    if args.auto_crop and args.align:
-        bounds = algo.auto_crop_output()
-        if bounds:
-            top, bottom, left, right = bounds
-            print(f"  Auto-cropped: {top}px top, {bottom}px bottom, {left}px left, {right}px right")
+        # Save output
+        ext = os.path.splitext(output_path)[1].lower()
+        bit_depth = args.bit_depth
 
-    # Save output
-    ext = os.path.splitext(args.output)[1].lower()
-    bit_depth = args.bit_depth
+        # EXR always uses 32-bit float
+        if ext == ".exr":
+            bit_depth = 32
 
-    # EXR always uses 32-bit float
-    if ext == ".exr":
-        bit_depth = 32
+        # JPG only supports 8-bit
+        if bit_depth == 16 and ext in (".jpg", ".jpeg"):
+            print("Warning: JPEG does not support 16-bit. Saving as 8-bit.", file=sys.stderr)
+            bit_depth = 8
 
-    # JPG only supports 8-bit
-    if bit_depth == 16 and ext in (".jpg", ".jpeg"):
-        print("Warning: JPEG does not support 16-bit. Saving as 8-bit.", file=sys.stderr)
-        bit_depth = 8
+        if bit_depth == 32:
+            # EXR: 32-bit float in 0-1 range
+            result = np.clip(algo.output_image, 0, 255).astype(np.float32) / 255.0
+            depth_str = "32-bit float"
+        elif bit_depth == 16:
+            # Scale 0-255 float32 -> 0-65535 uint16
+            result = np.clip(algo.output_image, 0, 255) * 257.0
+            result = np.around(result).astype(np.uint16)
+            depth_str = "16-bit"
+        else:
+            result = np.clip(np.around(algo.output_image), 0, 255).astype(np.uint8)
+            depth_str = "8-bit"
 
-    if bit_depth == 32:
-        # EXR: 32-bit float in 0-1 range
-        result = np.clip(algo.output_image, 0, 255).astype(np.float32) / 255.0
-        depth_str = "32-bit float"
-    elif bit_depth == 16:
-        # Scale 0-255 float32 -> 0-65535 uint16
-        result = np.clip(algo.output_image, 0, 255) * 257.0
-        result = np.around(result).astype(np.uint16)
-        depth_str = "16-bit"
-    else:
-        result = np.clip(np.around(algo.output_image), 0, 255).astype(np.uint8)
-        depth_str = "8-bit"
+        # Determine compression params
+        params = None
+        if ext in (".jpg", ".jpeg"):
+            params = [cv2.IMWRITE_JPEG_QUALITY, args.quality]
+        elif ext == ".png":
+            params = [cv2.IMWRITE_PNG_COMPRESSION, 4]
 
-    # Determine compression params
-    params = None
-    if ext in (".jpg", ".jpeg"):
-        params = [cv2.IMWRITE_JPEG_QUALITY, args.quality]
-    elif ext == ".png":
-        params = [cv2.IMWRITE_PNG_COMPRESSION, 4]
+        success = cv2.imwrite(output_path, result, params)
+        if not success:
+            print(f"Error: Failed to write output to {output_path}", file=sys.stderr)
+            sys.exit(1)
 
-    success = cv2.imwrite(args.output, result, params)
-    if not success:
-        print(f"Error: Failed to write output to {args.output}", file=sys.stderr)
-        sys.exit(1)
+        file_size = os.path.getsize(output_path)
+        print(f"  Output saved: {output_path} ({depth_str}, {file_size / 1024:.0f} KB)")
+        print(f"  Total time: {total_elapsed:.2f}s")
+        print(f"  Output shape: {result.shape}")
 
-    file_size = os.path.getsize(args.output)
-    print(f"  Output saved: {args.output} ({depth_str}, {file_size / 1024:.0f} KB)")
-    print(f"  Total time: {total_elapsed:.2f}s")
-    print(f"  Output shape: {result.shape}")
-
-    # Quality report on output
-    if args.quality_report:
-        sharpness = ImageLoadingHandler.compute_sharpness(result)
-        print(f"  Output sharpness: {sharpness:.1f}")
+        # Quality report on output
+        if args.quality_report:
+            sharpness = ImageLoadingHandler.compute_sharpness(result)
+            print(f"  Output sharpness: {sharpness:.1f}")
 
 
 if __name__ == "__main__":

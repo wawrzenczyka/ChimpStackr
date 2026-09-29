@@ -141,15 +141,23 @@ class SettingsPanel(qtw.QWidget):
             ("weighted_average", "Weighted", "Smooth contrast-based blend\n(good color fidelity)"),
             ("depth_map", "Depth Map", "Per-pixel sharpest source\n(best original color)"),
             ("exposure_fusion", "HDR", "Exposure/HDR fusion\n(varying lighting, not focus)"),
+            ("landscape", "Landscape", "Focus stack optimized for landscape scenes"),
+            ("landscape_blend", "Landscape Blend", "Focus-aware soft transitions for landscape scenes"),
         ]
         method_container = qtw.QWidget()
         method_container.setStyleSheet("background: #2a2a2a; border-radius: 8px;")
-        method_layout = qtw.QHBoxLayout(method_container)
+        method_layout = qtw.QGridLayout(method_container)
         method_layout.setContentsMargins(3, 3, 3, 3)
         method_layout.setSpacing(2)
 
         saved_method = settings.globalVars["QSettings"].value("algorithm/stacking_method") or "laplacian"
-        for key, label, tooltip in methods:
+        saved_methods = settings.globalVars["QSettings"].value("algorithm/stacking_methods")
+        if isinstance(saved_methods, str):
+            saved_methods = [saved_methods]
+        saved_methods = [key for key, _, _ in methods if saved_methods and key in saved_methods]
+        if not saved_methods:
+            saved_methods = [saved_method] if any(key == saved_method for key, _, _ in methods) else ["laplacian"]
+        for index, (key, label, tooltip) in enumerate(methods):
             btn = qtw.QPushButton(label)
             btn.setCheckable(True)
             btn.setToolTip(tooltip)
@@ -163,10 +171,15 @@ class SettingsPanel(qtw.QWidget):
                     background: #505050; color: #fff; font-weight: 600;
                 }
             """)
-            btn.setChecked(key == saved_method)
-            btn.clicked.connect(lambda checked, k=key: self._select_method(k))
-            method_layout.addWidget(btn)
+            btn.setChecked(key in saved_methods)
+            btn.clicked.connect(lambda checked, k=key: self._select_method(k, checked))
+            method_layout.addWidget(btn, index // 2, index % 2)
             self._method_buttons[key] = btn
+
+        # Migrate the legacy single-method preference and keep it in sync for
+        # callers that still read stacking_method directly.
+        settings.globalVars["QSettings"].setValue("algorithm/stacking_methods", saved_methods)
+        settings.globalVars["QSettings"].setValue("algorithm/stacking_method", saved_methods[0])
 
         layout.addWidget(method_container)
 
@@ -306,15 +319,17 @@ class SettingsPanel(qtw.QWidget):
             "middle: align all to middle image")
 
         self.alignment_mode_combo = qtw.QComboBox()
-        self.alignment_mode_combo.addItems(["Similarity (recommended)", "Euclidean", "Full Affine"])
-        mode_map = {"similarity": 0, "euclidean": 1, "affine": 2}
-        saved_mode = settings.globalVars["QSettings"].value("algorithm/alignment_mode") or "similarity"
+        self.alignment_mode_combo.addItems(["Auto (by method)", "Similarity", "Euclidean", "Full Affine", "Landscape", "Translation"])
+        mode_map = {"auto": 0, "similarity": 1, "euclidean": 2, "affine": 3, "landscape": 4, "translation": 5}
+        saved_mode = settings.globalVars["QSettings"].value("algorithm/alignment_mode") or "auto"
         self.alignment_mode_combo.setCurrentIndex(mode_map.get(saved_mode, 0))
         self.alignment_mode_combo.currentIndexChanged.connect(self._on_alignment_mode_changed)
         align_adv_section.add_row("Alignment mode", self.alignment_mode_combo,
-            "Similarity (4 DOF): shift, rotation, uniform scale — best for most stacks\n"
+            "Auto: Landscape for landscape methods; legacy similarity/translation otherwise\n"
+            "Similarity (4 DOF): shift, rotation, uniform scale\n"
             "Euclidean (3 DOF): shift, rotation only — no scale correction\n"
-            "Full Affine (6 DOF): shift, rotation, scale, shear — for extreme cases")
+            "Full Affine (6 DOF): shift, rotation, scale, shear — for extreme cases\n"
+            "Landscape: alignment tuned for landscape focus stacks")
 
         self.autocrop_checkbox = qtw.QCheckBox()
         self.autocrop_checkbox.setChecked(
@@ -393,15 +408,22 @@ class SettingsPanel(qtw.QWidget):
 
     def _on_alignment_mode_changed(self, index):
         """Handle alignment mode dropdown change."""
-        mode_keys = ["similarity", "euclidean", "affine"]
+        mode_keys = ["auto", "similarity", "euclidean", "affine", "landscape", "translation"]
         if 0 <= index < len(mode_keys):
             self.change_setting("algorithm/alignment_mode", mode_keys[index])
 
-    def _select_method(self, method_key):
-        """Handle segmented control method selection."""
-        for key, btn in self._method_buttons.items():
-            btn.setChecked(key == method_key)
-        self.change_setting("algorithm/stacking_method", method_key)
+    def _select_method(self, method_key, checked):
+        """Persist the selected methods, keeping at least one enabled."""
+        selected = self.get_selected_stacking_methods()
+        if not selected:
+            self._method_buttons[method_key].setChecked(True)
+            return
+        self.change_setting("algorithm/stacking_methods", selected)
+        self.change_setting("algorithm/stacking_method", selected[0])
+
+    def get_selected_stacking_methods(self):
+        """Return enabled stacking method keys in the control's display order."""
+        return [key for key, button in self._method_buttons.items() if button.isChecked()]
 
     def _auto_detect_params(self):
         """Auto-detect optimal parameters from currently loaded images."""

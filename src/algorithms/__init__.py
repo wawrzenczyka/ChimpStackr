@@ -41,6 +41,7 @@ class Algorithm:
         self._pause_event.set()  # Start unpaused (set = running)
         self.alignment_shifts = []  # Track all (x, y) shifts for auto-crop
         self._ref_gray_cache = (None, None)  # (id(ref_im), gray) cache
+        self.last_alignment_mask = None
 
     def cancel(self):
         self._cancel_event.set()
@@ -119,12 +120,15 @@ class Algorithm:
         Align im_to_align to ref_im.
         Returns float32 aligned image.
 
-        alignment_mode: "translation", "euclidean", "similarity", "affine"
+        alignment_mode: "translation", "euclidean", "similarity", "affine", "landscape"
         use_rst: legacy flag — if True and alignment_mode not explicitly set, uses euclidean
         """
+        self.last_alignment_mask = None
         # Handle path loading
         if isinstance(ref_im, str) and isinstance(im_to_align, str) and ref_im == im_to_align:
-            return self.load_image(im_to_align)
+            image = self.load_image(im_to_align)
+            self.last_alignment_mask = np.ones(image.shape[:2], dtype=bool)
+            return image
         if isinstance(ref_im, str):
             ref_im = self.load_image(ref_im)
         if isinstance(im_to_align, str):
@@ -138,7 +142,9 @@ class Algorithm:
         if use_rst and alignment_mode == "translation":
             alignment_mode = "euclidean"
 
-        if alignment_mode == "similarity":
+        if alignment_mode == "landscape":
+            result = self._align_landscape(ref_im, im_to_align, scale_factor)
+        elif alignment_mode == "similarity":
             result = self._align_similarity(ref_im, im_to_align, scale_factor)
         elif alignment_mode == "affine":
             result = self._align_affine(ref_im, im_to_align, scale_factor)
@@ -148,6 +154,124 @@ class Algorithm:
             result = self._align_translation(ref_im, im_to_align, scale_factor, coarse_fine)
 
         return result
+
+    def _align_landscape(self, ref_im, im_to_align, scale_factor):
+        """Focus-aware SIFT similarity alignment with guarded ECC refinement.
+
+        The model estimates correspondences at a bounded resolution, then
+        applies one full-resolution warp to the original float32 source.
+        Learned matchers can later replace SIFT without changing the warp and
+        validity-mask contract.
+        """
+        ref = self._to_gray_u8(ref_im)
+        moving = self._to_gray_u8(im_to_align)
+        h, w = ref.shape
+        scale = min(1.0, 2048.0 / max(h, w))
+        if scale < 1.0:
+            size = (max(16, round(w * scale)), max(16, round(h * scale)))
+            ref_small = cv2.resize(ref, size, interpolation=cv2.INTER_AREA)
+            mov_small = cv2.resize(moving, size, interpolation=cv2.INTER_AREA)
+            sx, sy = size[0] / w, size[1] / h
+        else:
+            ref_small, mov_small = ref, moving
+            sx = sy = 1.0
+
+        try:
+            sift = cv2.SIFT_create(nfeatures=5000)
+            kp_ref, des_ref = sift.detectAndCompute(ref_small, None)
+            kp_mov, des_mov = sift.detectAndCompute(mov_small, None)
+            if des_ref is None or des_mov is None:
+                raise ValueError("No stable focus-overlap features")
+            matches = cv2.BFMatcher(cv2.NORM_L2).knnMatch(des_ref, des_mov, k=2)
+            good = [m for pair in matches if len(pair) == 2
+                    for m, n in [pair] if m.distance < 0.7 * n.distance]
+            if len(good) < 12:
+                raise ValueError("Too few shared features")
+
+            points_ref = np.float32([kp_ref[m.queryIdx].pt for m in good])
+            points_mov = np.float32([kp_mov[m.trainIdx].pt for m in good])
+            coarse, inliers = cv2.estimateAffinePartial2D(
+                points_ref, points_mov, method=cv2.RANSAC,
+                ransacReprojThreshold=2.5, maxIters=4000, confidence=0.995,
+            )
+            if coarse is None or inliers is None or int(inliers.sum()) < 12:
+                raise ValueError("Similarity fit has too few inliers")
+            ratio = int(inliers.sum()) / len(good)
+            fit_scale = float(np.hypot(coarse[0, 0], coarse[1, 0]))
+            if ratio < 0.3 or not 0.75 < fit_scale < 1.33:
+                raise ValueError("Similarity fit is implausible")
+
+            # `coarse` maps reference pixels to moving pixels because all
+            # final warps use WARP_INVERSE_MAP.
+            full = coarse.astype(np.float64)
+            full[0, 1] *= sy / sx
+            full[1, 0] *= sx / sy
+            full[0, 2] /= sx
+            full[1, 2] /= sy
+            full = full.astype(np.float32)
+
+            # Refine only shared textured regions. ECC over an entire focus
+            # pair may be pulled toward the differently blurred background.
+            pre = cv2.warpAffine(
+                mov_small, coarse, ref_small.shape[::-1],
+                flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
+            lap_ref = cv2.boxFilter(np.abs(cv2.Laplacian(ref_small, cv2.CV_32F)),
+                                    -1, (11, 11))
+            lap_pre = cv2.boxFilter(np.abs(cv2.Laplacian(pre, cv2.CV_32F)),
+                                    -1, (11, 11))
+            mask = ((lap_ref > np.percentile(lap_ref, 45)) &
+                    (lap_pre > np.percentile(lap_pre, 45))).astype(np.uint8) * 255
+            if cv2.countNonZero(mask) > 2000:
+                residual = np.eye(2, 3, dtype=np.float32)
+                criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 80, 1e-6)
+                try:
+                    _, residual = cv2.findTransformECC(
+                        ref_small, pre, residual, cv2.MOTION_EUCLIDEAN,
+                        criteria, inputMask=mask, gaussFiltSize=5,
+                    )
+                    refined = cv2.warpAffine(
+                        pre, residual, ref_small.shape[::-1],
+                        flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                        borderMode=cv2.BORDER_REPLICATE,
+                    )
+                    before = float(cv2.mean(cv2.absdiff(ref_small, pre), mask)[0])
+                    after = float(cv2.mean(cv2.absdiff(ref_small, refined), mask)[0])
+                    if after < before:
+                        # First map reference -> prealigned, then prealigned
+                        # -> moving. Transform composition is C @ R.
+                        C = np.vstack([coarse, [0, 0, 1]])
+                        R = np.vstack([residual, [0, 0, 1]])
+                        combined = (C @ R)[:2]
+                        full = combined.astype(np.float64)
+                        full[0, 1] *= sy / sx
+                        full[1, 0] *= sx / sy
+                        full[0, 2] /= sx
+                        full[1, 2] /= sy
+                        full = full.astype(np.float32)
+                except cv2.error:
+                    pass
+
+            result = cv2.warpAffine(
+                im_to_align, full, (w, h),
+                flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+            )
+            self.last_alignment_mask = cv2.warpAffine(
+                np.ones(im_to_align.shape[:2], dtype=np.uint8), full, (w, h),
+                flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
+                borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+            ).astype(bool)
+            self._track_warp_shifts(full, im_to_align.shape)
+            return result
+        except (cv2.error, ValueError, AttributeError) as error:
+            # Fall back to the established path, and flag the border of its
+            # image as unknown until transform replay is available there.
+            import logging
+            logging.getLogger(__name__).warning("Landscape alignment fallback: %s", error)
+            result = self._align_similarity(ref_im, im_to_align, scale_factor)
+            return result
 
     def _get_ref_gray(self, ref_im):
         """Get cached grayscale of reference image (avoids redundant cvtColor)."""
@@ -177,6 +301,14 @@ class Algorithm:
             ref_gray=ref_gray,
         )
         self.alignment_shifts.append(self.DFT_Imreg.last_shift)
+        x_shift, y_shift = self.DFT_Imreg.last_shift
+        h, w = im_to_align.shape[:2]
+        self.last_alignment_mask = cv2.warpAffine(
+            np.ones((h, w), np.uint8),
+            np.float32([[1, 0, x_shift], [0, 1, y_shift]]), (w, h),
+            flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        ).astype(bool)
         return result
 
     def _align_rst(self, ref_im, im_to_align, scale_factor):
@@ -262,6 +394,7 @@ class Algorithm:
             borderMode=cv2.BORDER_CONSTANT, borderValue=0
         )
 
+        self.last_alignment_mask = self._valid_mask_for_warp(warp_matrix, im_to_align.shape)
         self._track_warp_shifts(warp_matrix, im_to_align.shape)
         return result
 
@@ -276,6 +409,15 @@ class Algorithm:
             max_dx = max(max_dx, abs(tx))
             max_dy = max(max_dy, abs(ty))
         self.alignment_shifts.append((max_dx, max_dy))
+
+    @staticmethod
+    def _valid_mask_for_warp(warp_matrix, shape):
+        h, w = shape[:2]
+        return cv2.warpAffine(
+            np.ones((h, w), dtype=np.uint8), warp_matrix, (w, h),
+            flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+        ).astype(bool)
 
     def _to_gray_u8(self, im):
         """Convert image to grayscale uint8 for feature matching / ECC."""
@@ -414,6 +556,7 @@ class Algorithm:
             flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP,
             borderMode=cv2.BORDER_CONSTANT, borderValue=0,
         )
+        self.last_alignment_mask = self._valid_mask_for_warp(combined, im_to_align.shape)
         self._track_warp_shifts(combined, im_to_align.shape)
         return result
 
@@ -451,6 +594,7 @@ class Algorithm:
             flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP,
             borderMode=cv2.BORDER_CONSTANT, borderValue=0,
         )
+        self.last_alignment_mask = self._valid_mask_for_warp(combined, im_to_align.shape)
         self._track_warp_shifts(combined, im_to_align.shape)
         return result
 

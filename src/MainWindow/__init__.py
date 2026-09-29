@@ -3,6 +3,8 @@
     It is the "root display".
 """
 import os
+from dataclasses import replace
+import numpy as np
 import PySide6.QtCore as qtc
 import PySide6.QtWidgets as qtw
 
@@ -41,6 +43,13 @@ class Window(qtw.QMainWindow):
 
         # Session state: track whether the stacked output has been exported
         self._output_exported = False
+        self._results = {}
+        self._exported_results = set()
+        self._selected_result = None
+        self._pending_results = []
+        self._stack_error = None
+        self._stack_cancelled = False
+        self._active_algorithm = None
 
         self.statusbar_msg_display_time = 2000  # (ms)
         self.supportedReadFormats = []
@@ -90,10 +99,13 @@ class Window(qtw.QMainWindow):
     @property
     def has_unsaved_work(self):
         """True only if there's an unexported stacked result."""
-        return (
-            self.LaplacianAlgorithm.output_image is not None
-            and not self._output_exported
-        )
+        return any(path not in self._exported_results for path in self._results)
+
+    def select_result(self, path):
+        """Make the selected preview's full precision result the export target."""
+        if path in self._results:
+            self._selected_result = path
+            self.LaplacianAlgorithm = self._results[path]
 
     def export_output_image(self):
         if self.LaplacianAlgorithm.output_image is not None:
@@ -129,6 +141,8 @@ class Window(qtw.QMainWindow):
                     self.LaplacianAlgorithm.output_image, imgType, outputFilePath
                 )
                 self._output_exported = True
+                if self._selected_result:
+                    self._exported_results.add(self._selected_result)
         else:
             msg = qtw.QMessageBox(self)
             msg.setStandardButtons(qtw.QMessageBox.Ok)
@@ -180,6 +194,8 @@ class Window(qtw.QMainWindow):
                 msg.setText(f"Exported {len(exported)} files to:\n{directory}")
                 msg.setInformativeText("PNG/TIFF: 16-bit, EXR: 32-bit float.")
                 msg.show()
+                if self._selected_result:
+                    self._exported_results.add(self._selected_result)
             except Exception as e:
                 msg = qtw.QMessageBox(self)
                 msg.setStandardButtons(qtw.QMessageBox.Ok)
@@ -215,6 +231,10 @@ class Window(qtw.QMainWindow):
                     settings.globalVars["LoadedImagePaths"]
                 )
                 self._main_content.add_processed_image(None)
+                self._results.clear()
+                self._exported_results.clear()
+                self._selected_result = None
+                self.LaplacianAlgorithm.output_image = None
                 return True
         else:
             # No images were originally loaded
@@ -290,13 +310,10 @@ class Window(qtw.QMainWindow):
         """True if a stacking operation is currently running or paused."""
         return getattr(self, '_stacking_active', False)
 
-    def _sync_algorithm_config(self):
-        """Sync algorithm config from settings widget before stacking."""
-        new_config = self.SettingsWidget.get_algorithm_config()
-        self.LaplacianAlgorithm.config = new_config
-
     def _start_stacking(self, method_name):
         """Common logic for starting align+stack or stack-only. Returns True if started."""
+        if self.is_stacking:
+            return False
         if len(settings.globalVars["LoadedImagePaths"]) == 0:
             msg = qtw.QMessageBox(self)
             msg.setStandardButtons(qtw.QMessageBox.Ok)
@@ -306,7 +323,13 @@ class Window(qtw.QMainWindow):
             msg.show()
             return False
 
-        self._sync_algorithm_config()
+        base_config = self.SettingsWidget.get_algorithm_config()
+        methods = self.SettingsWidget.get_selected_stacking_methods()
+        paths = list(settings.globalVars["LoadedImagePaths"])
+        auto_crop = bool(int(settings.globalVars["QSettings"].value("algorithm/auto_crop") or 1))
+        self._pending_results = []
+        self._stack_error = None
+        self._stack_cancelled = False
         self._stacking_active = True
         self.SettingsWidget.setEnabled(False)  # Lock settings during stacking
 
@@ -330,9 +353,30 @@ class Window(qtw.QMainWindow):
             except (AttributeError, RuntimeError, ZeroDivisionError):
                 pass  # Widget may be destroyed during shutdown
 
-        fn = getattr(self.LaplacianAlgorithm, method_name)
-        worker = QThreading.Worker(fn)
+        def run_methods(signals):
+            completed = []
+            try:
+                for method in methods:
+                    if self._stack_cancelled:
+                        break
+                    algo = algorithm_API.LaplacianPyramid(
+                        config=replace(base_config, stacking_method=method)
+                    )
+                    algo.update_image_paths(paths)
+                    self._active_algorithm = algo
+                    getattr(algo, method_name)(signals)
+                    if self._stack_cancelled or algo.output_image is None:
+                        break
+                    if auto_crop and method_name == "align_and_stack_images":
+                        algo.auto_crop_output()
+                    completed.append(algo)
+            finally:
+                self._pending_results = completed
+                self._active_algorithm = None
+
+        worker = QThreading.Worker(run_methods)
         worker.signals.finished.connect(self.finished_stack)
+        worker.signals.error.connect(self._stack_worker_error)
         worker.signals.finished_inter_task.connect(finished_inter_task)
 
         self.threadpool.start(worker)
@@ -347,10 +391,24 @@ class Window(qtw.QMainWindow):
 
     def cancel_stacking(self):
         """Cancel the currently running stacking operation."""
-        self.LaplacianAlgorithm.cancel()
-        self._stacking_active = False
-        self.SettingsWidget.setEnabled(True)  # Unlock settings
+        self._stack_cancelled = True
+        active = getattr(self, "_active_algorithm", None)
+        if active is not None:
+            active.cancel()
         self.statusBar().showMessage("Cancelling...", self.statusbar_msg_display_time)
+
+    def pause_stacking(self):
+        active = self._active_algorithm
+        if active is not None:
+            active.pause()
+
+    def resume_stacking(self):
+        active = self._active_algorithm
+        if active is not None:
+            active.resume()
+
+    def _stack_worker_error(self, error):
+        self._stack_error = str(error[1])
 
     def auto_crop_result(self):
         """Manually trigger auto-crop on the current output."""
@@ -360,7 +418,19 @@ class Window(qtw.QMainWindow):
         bounds = self.LaplacianAlgorithm.auto_crop_output()
         if bounds:
             top, bottom, left, right = bounds
-            self._main_content.add_processed_image(self.LaplacianAlgorithm.output_image)
+            if self._selected_result:
+                old_path = self._selected_result
+                old_list = self._main_content.ImageWidgets.processed_images_widget.list
+                for row in range(old_list.count()):
+                    if old_list.item(row).data(qtc.Qt.UserRole) == old_path:
+                        old_list.takeItem(row)
+                        break
+                self._results.pop(old_path, None)
+                self._exported_results.discard(old_path)
+            path = self._main_content.add_processed_image(self.LaplacianAlgorithm.output_image)
+            if path:
+                self._results[path] = self.LaplacianAlgorithm
+                self.select_result(path)
             self.statusBar().showMessage(
                 f"Cropped: {top}px top, {bottom}px bottom, {left}px left, {right}px right",
                 self.statusbar_msg_display_time
@@ -391,24 +461,20 @@ class Window(qtw.QMainWindow):
         if run_btn:
             run_btn.on_finished()
 
-        # If cancelled or no output produced, discard everything
-        if self.LaplacianAlgorithm.output_image is None:
-            self.LaplacianAlgorithm.Algorithm.alignment_shifts = []
-            self.statusBar().showMessage("Stacking cancelled", self.statusbar_msg_display_time)
-            return
-
-        # Auto-crop black edges if enabled in settings
-        auto_crop = bool(int(settings.globalVars["QSettings"].value("algorithm/auto_crop") or 1))
-        if auto_crop:
-            bounds = self.LaplacianAlgorithm.auto_crop_output()
-            if bounds:
-                top, bottom, left, right = bounds
-                self.statusBar().showMessage(
-                    f"Auto-cropped: {top}px top, {bottom}px bottom, {left}px left, {right}px right",
-                    self.statusbar_msg_display_time
-                )
-
-        self._main_content.add_processed_image(self.LaplacianAlgorithm.output_image)
+        for algo in self._pending_results:
+            self.LaplacianAlgorithm = algo
+            path = self._main_content.add_processed_image(algo.output_image)
+            if path:
+                self._results[path] = algo
+                self.select_result(path)
+        count = len(self._pending_results)
+        self._pending_results = []
+        if self._stack_error:
+            self.statusBar().showMessage(f"Stacking failed: {self._stack_error}", 10000)
+        elif self._stack_cancelled:
+            self.statusBar().showMessage(f"Stacking cancelled; kept {count} completed result(s)", 5000)
+        else:
+            self.statusBar().showMessage(f"Created {count} result(s)", 5000)
         self._output_exported = False
 
     def closeEvent(self, event):

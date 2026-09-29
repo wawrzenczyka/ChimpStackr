@@ -98,12 +98,12 @@ class RunButton(qtw.QToolButton):
             self._update_state("running")
 
     def _on_pause(self):
-        self.mainWindow.LaplacianAlgorithm.pause()
+        self.mainWindow.pause_stacking()
         self._update_state("paused")
         self.mainWindow.statusBar().showMessage("Paused", 2000)
 
     def _on_resume(self):
-        self.mainWindow.LaplacianAlgorithm.resume()
+        self.mainWindow.resume_stacking()
         self._update_state("running")
         self.mainWindow.statusBar().showMessage("Resumed", 2000)
 
@@ -176,11 +176,11 @@ def setup_actions():
     processing_menu.addSeparator()
 
     pause_action = qtg.QAction(icon_pause(), "&Pause", mainWindow)
-    pause_action.triggered.connect(mainWindow.LaplacianAlgorithm.pause)
+    pause_action.triggered.connect(mainWindow.pause_stacking)
     processing_menu.addAction(pause_action)
 
     resume_action = qtg.QAction(icon_play(), "&Resume", mainWindow)
-    resume_action.triggered.connect(mainWindow.LaplacianAlgorithm.resume)
+    resume_action.triggered.connect(mainWindow.resume_stacking)
     processing_menu.addAction(resume_action)
 
     cancel_action = qtg.QAction(icon_stop(), "&Stop", mainWindow)

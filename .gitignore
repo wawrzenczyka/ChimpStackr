@@ -117,6 +117,8 @@ celerybeat.pid
 *.sage.py
 
 # Environments
+.pixi/
+.pixi-cache/
 .env
 .venv*
 env/

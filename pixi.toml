@@ -1,0 +1,31 @@
+[workspace]
+name = "chimpstackr"
+channels = ["conda-forge"]
+platforms = ["win-64"]
+
+[dependencies]
+python = ">=3.11,<3.13"
+
+[pypi-dependencies]
+pyside6-essentials = ">=6.4.2,<7.0"
+opencv-python-headless = ">=4.7,<5.0"
+numpy = ">=1.23,<3.0"
+numba = ">=0.56"
+rawpy = ">=0.18"
+imageio = ">=2.29"
+pyfftw = ">=0.13"
+scipy = ">=1.10"
+
+[tasks]
+gui = "python src/run.py"
+cli-help = "python -m src.cli --help"
+cli = "python -m src.cli"
+
+[feature.dev.pypi-dependencies]
+pytest = ">=7.0"
+
+[feature.dev.tasks]
+test = "python -m pytest tests/ -v"
+
+[environments]
+dev = ["dev"]
